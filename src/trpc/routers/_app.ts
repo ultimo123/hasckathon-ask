@@ -1,12 +1,8 @@
-import { baseProcedure, createTRPCRouter } from "../init";
-import prisma from "@/lib/db";
+import { projectsRouter } from "@/features/home/servers/routers";
+import { createTRPCRouter } from "../init";
 
 export const appRouter = createTRPCRouter({
-  workflows: createTRPCRouter({
-    getUsers: baseProcedure.query(async () => {
-      return await prisma.user.findMany();
-    }),
-  }),
+  projects: projectsRouter,
 });
 
 export type AppRouter = typeof appRouter;
