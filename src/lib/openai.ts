@@ -33,10 +33,12 @@ export async function callOpenAI(
     }
 
     console.log("✅ OpenAI client created, making API call...");
-    console.log("📝 Using model:", process.env.OPENAI_MODEL || "gpt-4o-mini");
+    // Default to gpt-3.5-turbo which is cheaper and has better quota availability
+    const model = process.env.OPENAI_MODEL || "gpt-3.5-turbo";
+    console.log("📝 Using model:", model);
 
     const response = await client.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      model,
       messages: [
         {
           role: "system",
@@ -78,12 +80,40 @@ export async function callOpenAI(
       // Update ProjectTeam with matched employees
       await updateProjectTeam(projectId, parsedData);
     }
-  } catch (error) {
+  } catch (error: any) {
     // Log error but don't throw - this is fire and forget
-    console.error("❌ OpenAI API call failed:", error);
-    if (error instanceof Error) {
-      console.error("Error message:", error.message);
-      console.error("Error stack:", error.stack);
+    console.error("❌ OpenAI API call failed for project:", projectId);
+
+    if (error?.status === 429) {
+      console.error(
+        "🚫 OpenAI Quota Exceeded - Please check your OpenAI billing and plan"
+      );
+      console.error(
+        "The project was created successfully, but AI matching could not be completed."
+      );
+      console.error(
+        "You can manually assign team members or update your OpenAI quota."
+      );
+    } else if (error?.status === 401) {
+      console.error(
+        "🔑 OpenAI API Key Invalid - Please check your OPENAI_API_KEY environment variable"
+      );
+    } else if (error?.status === 500 || error?.status >= 500) {
+      console.error(
+        "⚠️ OpenAI Server Error - The service may be temporarily unavailable"
+      );
+    } else {
+      console.error("❌ OpenAI API Error:", error?.message || "Unknown error");
     }
+
+    if (error instanceof Error) {
+      console.error("Error details:", {
+        message: error.message,
+        status: (error as any)?.status,
+        code: (error as any)?.code,
+      });
+    }
+
+    // Don't throw - let the project creation succeed even if AI matching fails
   }
 }

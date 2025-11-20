@@ -3,7 +3,12 @@ import { createTRPCRouter } from "@/trpc/init";
 import prisma from "@/lib/db";
 import { z } from "zod";
 import { constructPrompt } from "@/lib/utils";
-import { callOpenAI } from "@/lib/openai";
+import { callAI } from "@/lib/ai-service";
+import {
+  generateAlternativeTeams,
+  predictProjectSuccess,
+  analyzeSkillGaps,
+} from "@/lib/ai-enhanced";
 
 const createProjectSchema = z.object({
   project_name: z.string().min(1, "Project name is required").max(100),
@@ -113,9 +118,9 @@ export const projectsRouter = createTRPCRouter({
             project.project_id
           );
 
-          // Fire and forget OpenAI call
-          callOpenAI(prompt, project.project_id).catch((error) => {
-            console.error("❌ Error in OpenAI call:", error);
+          // Fire and forget AI call (using Groq or OpenAI)
+          callAI(prompt, project.project_id).catch((error) => {
+            console.error("❌ Error in AI call:", error);
           });
         } catch (error) {
           console.error("Error in createProject background task:", error);
@@ -127,6 +132,18 @@ export const projectsRouter = createTRPCRouter({
         id: project.project_id,
       };
     }),
+
+  deleteProject: baseProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      // Delete the project (cascade will handle related records)
+      await prisma.project.delete({
+        where: { project_id: input.id },
+      });
+
+      return { success: true };
+    }),
+
   getOne: baseProcedure
     .input(z.object({ id: z.number() }))
     .query(async ({ input }) => {
@@ -371,5 +388,356 @@ export const projectsRouter = createTRPCRouter({
         });
 
       return qualifiedEmployees;
+    }),
+
+  // Phase 1: Alternative Team Compositions
+  getAlternativeTeams: baseProcedure
+    .input(z.object({ projectId: z.number() }))
+    .query(async ({ input }) => {
+      const project = await prisma.project.findUnique({
+        where: { project_id: input.projectId },
+        include: {
+          skills: {
+            include: {
+              skill: true,
+            },
+          },
+        },
+      });
+
+      if (!project || !project.description) {
+        throw new Error("Project not found or missing description");
+      }
+
+      const employees = await prisma.employee.findMany({
+        include: {
+          skills: {
+            include: {
+              skill: true,
+            },
+          },
+        },
+      });
+
+      const skills = await prisma.skill.findMany();
+
+      const alternativeTeams = await generateAlternativeTeams(
+        project.description,
+        employees,
+        skills,
+        input.projectId
+      );
+
+      // Enrich employee data with names
+      const employeeMap = new Map(
+        employees.map((emp) => [emp.employee_id, emp.full_name])
+      );
+
+      // Add employee names to each team's employees
+      const enrichedTeams = alternativeTeams.map((team) => ({
+        ...team,
+        employees: team.employees.map((emp) => ({
+          ...emp,
+          employeeName: employeeMap.get(emp.employeeId) || `Employee #${emp.employeeId}`,
+        })),
+      }));
+
+      return enrichedTeams;
+    }),
+
+  // Phase 1: Project Success Prediction
+  getProjectPrediction: baseProcedure
+    .input(z.object({ projectId: z.number() }))
+    .query(async ({ input }) => {
+      const project = await prisma.project.findUnique({
+        where: { project_id: input.projectId },
+        include: {
+          skills: {
+            include: {
+              skill: true,
+            },
+          },
+          seniority: true,
+          team: {
+            include: {
+              employee: {
+                include: {
+                  skills: {
+                    include: {
+                      skill: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      if (!project) {
+        throw new Error("Project not found");
+      }
+
+      const prediction = await predictProjectSuccess(
+        project.description || "",
+        project.team,
+        {
+          skills: project.skills.map((ps) => ps.skill.skill_name),
+          seniority: project.seniority.map((s) => s.seniority_level),
+        }
+      );
+
+      return prediction;
+    }),
+
+  // Phase 1: Skill Gap Analysis
+  getSkillGaps: baseProcedure
+    .input(z.object({ projectId: z.number() }))
+    .query(async ({ input }) => {
+      const project = await prisma.project.findUnique({
+        where: { project_id: input.projectId },
+        include: {
+          skills: {
+            include: {
+              skill: true,
+            },
+          },
+          team: {
+            include: {
+              employee: {
+                include: {
+                  skills: {
+                    include: {
+                      skill: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      if (!project) {
+        throw new Error("Project not found");
+      }
+
+      const requiredSkills = project.skills.map((ps) => ({
+        skill_name: ps.skill.skill_name,
+        min_experience_years: ps.min_experience_years,
+      }));
+
+      const teamMembers = project.team.map((pt) => ({
+        employee: {
+          skills: pt.employee.skills.map((es) => ({
+            skill_name: es.skill.skill_name,
+            experience_years: es.experience_years,
+          })),
+        },
+      }));
+
+      const gaps = analyzeSkillGaps(requiredSkills, teamMembers);
+
+      return gaps;
+    }),
+
+  // Phase 3: Multi-Project Resource Optimization
+  getResourceConflicts: baseProcedure.query(async () => {
+    const { findResourceConflicts } = await import(
+      "@/lib/resource-optimization"
+    );
+    return await findResourceConflicts();
+  }),
+
+  getResourceAllocation: baseProcedure.query(async () => {
+    const { getResourceAllocation } = await import(
+      "@/lib/resource-optimization"
+    );
+    return await getResourceAllocation();
+  }),
+
+  getUnallocatedEmployees: baseProcedure.query(async () => {
+    const { getUnallocatedEmployees } = await import(
+      "@/lib/resource-optimization"
+    );
+    return await getUnallocatedEmployees();
+  }),
+
+  // Phase 3: Employee Growth Tracking
+  getEmployeeGrowth: baseProcedure
+    .input(z.object({ employeeId: z.number().optional() }))
+    .query(async ({ input }) => {
+      const { calculateEmployeeGrowth, getAllEmployeeGrowth } = await import(
+        "@/lib/employee-growth"
+      );
+      if (input.employeeId) {
+        const growth = await calculateEmployeeGrowth(input.employeeId);
+        return growth ? [growth] : [];
+      }
+      return await getAllEmployeeGrowth();
+    }),
+
+  // Phase 3: Budget Optimization
+  getTeamBudget: baseProcedure
+    .input(
+      z.object({
+        teamMembers: z.array(
+          z.object({
+            employee: z.object({
+              seniority: z.string().nullable().optional(),
+            }),
+          })
+        ),
+        projectDurationWeeks: z.number().default(12),
+      })
+    )
+    .query(async ({ input }) => {
+      const { calculateTeamCost, calculateROI } = await import(
+        "@/lib/budget-optimization"
+      );
+      const cost = calculateTeamCost(
+        input.teamMembers,
+        input.projectDurationWeeks
+      );
+      const roi = calculateROI(cost.totalCost, input.projectDurationWeeks);
+      return { cost, roi };
+    }),
+
+  // Save team from Interactive Team Builder
+  saveProjectTeam: baseProcedure
+    .input(
+      z.object({
+        projectId: z.number(),
+        employeeIds: z.array(z.number()),
+      })
+    )
+    .mutation(async ({ input }) => {
+      // First, remove all existing team members for this project
+      await prisma.projectTeam.deleteMany({
+        where: {
+          project_id: input.projectId,
+        },
+      });
+
+      // Validate employee IDs exist
+      const validEmployees = await prisma.employee.findMany({
+        where: {
+          employee_id: {
+            in: input.employeeIds,
+          },
+        },
+        select: {
+          employee_id: true,
+        },
+      });
+
+      const validEmployeeIds = validEmployees.map((e) => e.employee_id);
+
+      if (validEmployeeIds.length === 0) {
+        throw new Error("No valid employees found");
+      }
+
+      // Add new team members
+      const result = await prisma.projectTeam.createMany({
+        data: validEmployeeIds.map((employeeId) => ({
+          project_id: input.projectId,
+          employee_id: employeeId,
+          score: null, // No AI score for manually selected team
+        })),
+      });
+
+      return {
+        success: true,
+        count: result.count,
+      };
+    }),
+
+  // AI Suggest team members for Interactive Team Builder
+  suggestTeamMembers: baseProcedure
+    .input(z.object({ projectId: z.number() }))
+    .query(async ({ input }) => {
+      const project = await prisma.project.findUnique({
+        where: { project_id: input.projectId },
+        include: {
+          skills: {
+            include: {
+              skill: true,
+            },
+          },
+        },
+      });
+
+      if (!project || !project.description) {
+        throw new Error("Project not found or missing description");
+      }
+
+      const employees = await prisma.employee.findMany({
+        include: {
+          skills: {
+            include: {
+              skill: true,
+            },
+          },
+          projectTeams: {
+            where: {
+              project_id: input.projectId,
+            },
+          },
+        },
+      });
+
+      // Filter out employees already in the team
+      const availableEmployees = employees.filter(
+        (emp) => emp.projectTeams.length === 0
+      );
+
+      if (availableEmployees.length === 0) {
+        return [];
+      }
+
+      const skills = await prisma.skill.findMany();
+
+      // Use AI to suggest top employees
+      const { generateAlternativeTeams } = await import("@/lib/ai-enhanced");
+      const suggestions = await generateAlternativeTeams(
+        project.description,
+        availableEmployees,
+        skills,
+        input.projectId
+      );
+
+      // Get the "balanced" strategy team (or first available)
+      const balancedTeam =
+        suggestions.find((t) => t.strategy === "balanced") || suggestions[0];
+
+      if (!balancedTeam || balancedTeam.employees.length === 0) {
+        // Fallback: return top qualified employees
+        return availableEmployees.slice(0, 5).map((emp) => ({
+          employeeId: emp.employee_id,
+          fullName: emp.full_name,
+          reason: "Top match based on skills",
+        }));
+      }
+
+      // Map AI suggestions to employee details
+      const suggestedEmployeeIds = balancedTeam.employees.map(
+        (e) => e.employeeId
+      );
+      const suggestedEmployees = availableEmployees.filter((emp) =>
+        suggestedEmployeeIds.includes(emp.employee_id)
+      );
+
+      return suggestedEmployees.map((emp) => {
+        const aiMatch = balancedTeam.employees.find(
+          (e) => e.employeeId === emp.employee_id
+        );
+        return {
+          employeeId: emp.employee_id,
+          fullName: emp.full_name,
+          reason:
+            aiMatch?.reason || "AI recommended based on project requirements",
+          score: aiMatch?.score || 0,
+        };
+      });
     }),
 });

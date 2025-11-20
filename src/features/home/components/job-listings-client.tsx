@@ -1,10 +1,30 @@
 "use client";
 
+import { useState } from "react";
 import { JobListings } from "./job-listings";
-import { useSuspenseProjects } from "../hooks/use-projects";
+import { useSuspenseProjects, useDeleteProject } from "../hooks/use-projects";
+import { DeleteProjectDialog } from "./delete-project-dialog";
 
 export function JobListingsClient() {
   const projects = useSuspenseProjects();
+  const deleteProject = useDeleteProject();
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [projectToDelete, setProjectToDelete] = useState<{
+    id: number;
+    title: string;
+  } | null>(null);
+
+  const handleDeleteClick = (id: number, title: string) => {
+    setProjectToDelete({ id, title });
+    setDeleteDialogOpen(true);
+  };
+
+  const handleDeleteConfirm = () => {
+    if (projectToDelete) {
+      deleteProject.mutate({ id: projectToDelete.id });
+      setProjectToDelete(null);
+    }
+  };
 
   console.log(projects.data);
 
@@ -60,5 +80,18 @@ export function JobListingsClient() {
     );
   }
 
-  return <JobListings jobs={projects.data} />;
+  return (
+    <>
+      <JobListings
+        jobs={projects.data}
+        onDelete={handleDeleteClick}
+      />
+      <DeleteProjectDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        onConfirm={handleDeleteConfirm}
+        projectTitle={projectToDelete?.title}
+      />
+    </>
+  );
 }
